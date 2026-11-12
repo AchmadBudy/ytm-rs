@@ -57,6 +57,21 @@ const CARD_TRAVEL: f32 = CARD_SIZE.y - PILL_HEIGHT;
 const VIDEO_SIZE: Vec2 = vec2(480.0, 270.0);
 const VIDEO_MIN: Vec2 = vec2(240.0, 135.0);
 const VIDEO_MAX: Vec2 = vec2(1280.0, 720.0);
+/// How much taller the strip grows to show lyrics: the line before, the one being sung
+/// and the one after.
+const LYRICS_H: f32 = 92.0;
+/// From one lyric line's middle to the next.
+const LYRIC_ROW: f32 = 27.0;
+/// How long the lines take to move up when the next one starts.
+const LYRIC_SCROLL: f64 = 0.35;
+
+/// The strip shows the song's lyrics under its controls.
+static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The strip shows lyrics (not the pill, nor the video).
+pub fn lyrics_shown() -> bool {
+    LYRICS.load(std::sync::atomic::Ordering::Relaxed) && !pill_active() && !video_active()
+}
 
 /// The mini player is the video (picture in picture): a video was on show when it opened.
 static VIDEO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -143,6 +158,8 @@ fn mini_size() -> Vec2 {
         VIDEO_SIZE
     } else if pill_active() {
         PILL_WINDOW
+    } else if lyrics_shown() {
+        SIZE + vec2(0.0, LYRICS_H)
     } else {
         SIZE
     }
@@ -326,10 +343,15 @@ pub struct Mini {
     /// When the card was last asked for, so the second click of a double-click on More
     /// can't land on what has grown under the pointer.
     card_at: f64,
+    /// The strip moved up to make room for the lyrics (there wasn't any below it), so it
+    /// moves back down when they're hidden.
+    lyrics_lifted: bool,
 }
 
 impl Mini {
     pub fn load(get: impl Fn(&str) -> Option<String>) -> Self {
+        // Before the place, which is clamped to the strip's height with or without them.
+        LYRICS.store(get("mini_lyrics").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
         Mini {
             on: false,
             pinned: get("mini_pinned").map_or(PINNED_BY_DEFAULT, |v| v == "1"),
@@ -355,6 +377,7 @@ impl Mini {
             lifted: false,
             grown: false,
             card_at: f64::NEG_INFINITY,
+            lyrics_lifted: false,
         }
     }
 
@@ -428,6 +451,7 @@ impl Mini {
 
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
         storage.set_string("mini_pinned", if self.pinned { "1" } else { "0" }.into());
+        storage.set_string("mini_lyrics", if LYRICS.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" }.into());
         let strip_key = if pill_active() { "mini_pill_window" } else { "mini_window" };
         for (key, place) in [(strip_key, &self.place), (VIDEO_KEY, &self.video_place)] {
             if let Some(p) = place {
@@ -537,6 +561,7 @@ impl Mini {
         }
         let mut step = Step::Resize;
         self.card = false;
+        self.lyrics_lifted = false;
         if to_mini {
             self.was_maximized = ctx.input(|i| i.viewport().maximized == Some(true));
             if self.was_maximized {
@@ -545,6 +570,40 @@ impl Mini {
             }
         }
         self.switch = Some(Switch { to_mini, step, since: now, from: ctx.content_rect().size() });
+        ctx.request_repaint();
+    }
+
+    /// Show or hide the lyrics under the strip: it grows downwards, or upwards where
+    /// there's no room below it, and shrinks back the same way.
+    pub fn set_lyrics(&mut self, ctx: &egui::Context, on: bool) {
+        LYRICS.store(on, std::sync::atomic::Ordering::Relaxed);
+        if !self.showing() || pill_active() || video_active() {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            let below = (self.screens.work_area)().is_some_and(|a| (outer.bottom() + LYRICS_H) * ppp > a.bottom());
+            let dy = if on && below {
+                self.lyrics_lifted = true;
+                -LYRICS_H
+            } else if !on && std::mem::take(&mut self.lyrics_lifted) {
+                LYRICS_H
+            } else {
+                0.0
+            };
+            if dy != 0.0 {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min + vec2(0.0, dy)));
+            }
+        }
+        // Growing, the old height would still be the most; shrinking, the least.
+        let size = vec2(ctx.content_rect().width(), mini_size().y);
+        if on {
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(vec2(width_limits().1, size.y)));
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(width_limits().0, size.y)));
+        }
+        self.limits(ctx, true);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         ctx.request_repaint();
     }
 
@@ -653,7 +712,8 @@ impl Mini {
                     let w = std::env::var("YTM_MINI_W").ok().and_then(|w| w.parse().ok()).unwrap_or(mini_size().x);
                     clamp_size(Place { w, h: mini_size().y, ..here })
                 }
-                (Some(p), _) if self.visible(p, frame) => p,
+                // Its height with or without the lyrics, whichever is now.
+                (Some(p), _) if self.visible(p, frame) => clamp_size(p),
                 (_, here) => {
                     let scale = here.map_or(1.0, |h| h.scale);
                     // Not Windows: the bottom right of the full window, where the player bar was.
@@ -749,7 +809,8 @@ pub fn strip(app: &mut App, ui: &mut Ui, now: f64) {
 
     let track = app.current().cloned();
     let pad = 12.0;
-    let art = Rect::from_min_size(r.min + Vec2::splat(pad), Vec2::splat(r.height() - 2.0 * pad - 4.0));
+    // The strip's own height: the lyrics, when shown, are under it.
+    let art = Rect::from_min_size(r.min + Vec2::splat(pad), Vec2::splat(SIZE.y - 2.0 * pad - 4.0));
     match &track {
         Some(t) => paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 1.0, 1.0),
         None => {
@@ -778,10 +839,10 @@ pub fn strip(app: &mut App, ui: &mut Ui, now: f64) {
     let scope = ui.scope_id();
     // By a key, not the label: the pin's changes, and its focus has to stay.
     let btn_id = move |key: &str| scope.with(("mini-btn", key));
-    let focused = ctx.memory(|m| m.focused()).is_some_and(|f| ["close", "full", "pin"].iter().any(|k| btn_id(k) == f));
+    let focused = ctx.memory(|m| m.focused()).is_some_and(|f| ["close", "full", "pin", "lyrics"].iter().any(|k| btn_id(k) == f));
     let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p));
     let reveal = theme::anim_bool(&ctx, "mini-btns", over || focused, 0.15);
-    let count = if titlebar::custom() { 3.0 } else { 2.0 };
+    let count = if titlebar::custom() { 4.0 } else { 3.0 };
     let backdrop = Rect::from_min_max(pos2(r.right() - 6.0 - 30.0 * count - 2.0, r.top() + 2.0), pos2(r.right() - 2.0, r.top() + 38.0));
     // Opaque, so the title under it fades out instead of showing through.
     let pill = theme::lerp_color(super::shell::base_color(app), if theme::light() { Color32::WHITE } else { Color32::BLACK }, 0.55);
@@ -817,6 +878,10 @@ pub fn strip(app: &mut App, ui: &mut Ui, now: f64) {
     let pinned = app.mini.pinned;
     if top_btn(ui, if pinned { icon::PIN } else { icon::PIN_OFF }, "pin", if pinned { "Stop keeping on top" } else { "Keep on top" }, false, pinned) {
         app.mini.set_pinned(&ctx, !pinned);
+    }
+    let lyrics = lyrics_shown();
+    if top_btn(ui, icon::MIC_VOCAL, "lyrics", if lyrics { "Hide lyrics" } else { "Show lyrics" }, false, lyrics) {
+        app.mini.set_lyrics(&ctx, !lyrics);
     }
 
     // One group, centred under the text: like, previous, play, next, volume.
@@ -885,7 +950,97 @@ pub fn strip(app: &mut App, ui: &mut Ui, now: f64) {
         toggle_mute(app, ui);
     }
 
+    if lyrics_shown() && r.height() > SIZE.y + LYRIC_ROW {
+        let area = Rect::from_min_max(pos2(r.left() + pad, r.top() + SIZE.y - 2.0), pos2(r.right() - pad, r.bottom() - 10.0));
+        strip_lyrics(app, ui, area, now);
+    }
+
     seek_line(app, ui, r, track.as_ref());
+}
+
+/// Where the strip's lyrics are scrolled to: the line they're moving to, and from where.
+#[derive(Clone, Default)]
+struct LyricScroll {
+    /// The song and source the lines are from: another starts them over.
+    key: (String, &'static str),
+    line: isize,
+    from: f32,
+    since: f64,
+}
+
+/// The line before, the one being sung (bright and larger) and the one after, moving up
+/// as the song goes on. Plain text, not the karaoke view: three lines in a small window.
+fn strip_lyrics(app: &mut App, ui: &mut Ui, area: Rect, now: f64) {
+    use crate::lyrics::Sync;
+    let ctx = ui.ctx().clone();
+    let painter = ui.painter_at(area);
+    // A faint rule between the strip and its lyrics.
+    painter.hline(area.x_range(), area.top(), egui::Stroke::new(1.0, theme::glass(0.12)));
+    let note = |text: &str| {
+        let g = widgets::galley(ui, text, theme::regular(13.0), theme::text_faint(), area.width());
+        painter.galley(area.center() - g.size() / 2.0, g, theme::text_faint());
+    };
+    let Some((id, set)) = app.lyrics.take() else {
+        note(if app.current().is_some() { "Loading lyrics…" } else { "" });
+        return;
+    };
+    let hide_break_only = app.look().lyrics.hide_instrumental_only;
+    let chosen = app.lyric_prefs.choose(&id, &set).and_then(|p| set.get(p)).filter(|l| !hide_break_only || !l.lines.iter().all(|x| x.instrumental));
+    let Some(lyrics) = chosen else {
+        note("No lyrics for this song");
+        app.lyrics = Some((id, set));
+        return;
+    };
+    if lyrics.sync == Sync::None {
+        note("These lyrics aren't synced");
+        app.lyrics = Some((id, set));
+        return;
+    }
+    let t = app.lyric_time(&id, lyrics, now);
+    // The last line that has started; -1 before the first.
+    let line = lyrics.lines.partition_point(|l| l.start as f64 / 1000.0 <= t) as isize - 1;
+    let key = (id.clone(), lyrics.provider.key());
+    let mem = ui.scope_id().with("mini-lyrics");
+    let mut s: LyricScroll = ctx.data(|d| d.get_temp(mem)).unwrap_or_default();
+    let shown = |s: &LyricScroll| {
+        let k = ((now - s.since) / LYRIC_SCROLL).clamp(0.0, 1.0) as f32;
+        egui::lerp(s.from..=s.line as f32, theme::ease_out(k))
+    };
+    if s.key != key {
+        s = LyricScroll { key, line, from: line as f32, since: now };
+    } else if s.line != line {
+        // A jump (a seek) goes there at once; the next line scrolls up.
+        let from = if (line - s.line).abs() > 2 { line as f32 } else { shown(&s) };
+        s = LyricScroll { line, from, since: now, ..s };
+    }
+    let pos = shown(&s);
+    let moving = pos != s.line as f32;
+    ctx.data_mut(|d| d.insert_temp(mem, s));
+
+    let font = app.look().lyrics.font.clone();
+    let mid = area.center().y + 2.0;
+    let first = (pos.floor() as isize - 2).max(0);
+    let last = (pos.ceil() as isize + 2).min(lyrics.lines.len() as isize - 1);
+    for i in first..=last {
+        let l = &lyrics.lines[i as usize];
+        // 0 for the line being sung, 1 for those either side.
+        let d = (i as f32 - pos).abs().min(2.0);
+        let near = (1.0 - d).max(0.0);
+        let text = if l.instrumental || l.text.trim().is_empty() { "♪" } else { l.text.trim() };
+        let size = egui::lerp(13.0..=16.0, near);
+        let weight = if near > 0.5 { crate::preset::Weight::Bold } else { crate::preset::Weight::Medium };
+        let color = theme::lerp_color(theme::text_dim(), theme::text(), near).gamma_multiply(1.0 - (d - 1.0).max(0.0));
+        let g = widgets::galley(ui, text, theme::lyric_font_for(&font, weight, size, text), color, area.width());
+        let y = mid + (i as f32 - pos) * LYRIC_ROW;
+        painter.galley(pos2(area.center().x - g.size().x / 2.0, y - g.size().y / 2.0), g, color);
+    }
+    app.lyrics = Some((id, set));
+    if moving {
+        ctx.request_repaint_after(Duration::from_millis(16));
+    } else if app.playing() {
+        // Soon enough for the next line to start on time.
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
 }
 
 /// What's on the play button, `k` times the strip's size: play, pause or a spinner.

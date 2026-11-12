@@ -24,6 +24,15 @@ impl App {
         set.get(self.lyric_prefs.choose(id, set)?)
     }
 
+    /// Where `lyrics` of the song `id` are now, in seconds on their own clock: what's
+    /// heard (the device plays a buffer behind the player), smoothed, less the offsets.
+    pub(super) fn lyric_time(&mut self, id: &str, lyrics: &Lyrics, now: f64) -> f64 {
+        let playing = self.playing();
+        let pos = self.audio.status.position_smooth().as_secs_f64() - self.audio.status.latency().as_secs_f64();
+        let pos = self.lyric_clock.tick(pos, playing, now, self.audio.status.speed() as f64);
+        pos - self.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == crate::lyrics::Sync::Word)
+    }
+
     /// Lyrics have loaded, and no enabled source has any.
     pub(super) fn no_lyrics(&self) -> bool {
         self.lyrics.is_some() && self.lyric_choice().is_none()
