@@ -39,7 +39,9 @@ const MARGIN: f32 = 16.0;
 /// would take the clicks meant for what's around the pill.
 const CARD: bool = cfg!(windows);
 const PILL_REST: f32 = 216.0;
-const PILL_OPEN: f32 = 290.0 + if CARD { 26.0 } else { 0.0 };
+/// The open pill's lyrics button, and the room it takes.
+const PILL_LYRICS_BTN: f32 = 33.0;
+const PILL_OPEN: f32 = 290.0 + PILL_LYRICS_BTN + if CARD { 26.0 } else { 0.0 };
 const PILL_HEIGHT: f32 = 56.0;
 /// As wide as the open pill, so it only grows up or down.
 const CARD_SIZE: Vec2 = vec2(PILL_OPEN, 252.0);
@@ -50,8 +52,26 @@ const CARD_RADIUS: f32 = 22.0;
 const PILL_WINDOW: Vec2 = vec2(PILL_OPEN + 2.0, PILL_HEIGHT + 2.0);
 /// The window while the card shows, or is on its way.
 const CARD_WINDOW: Vec2 = vec2(PILL_WINDOW.x, CARD_SIZE.y + 2.0);
+/// The pill showing lyrics: tall enough for the line before, the one being sung and the
+/// one after.
+const PILL_LYRICS_HEIGHT: f32 = 78.0;
+/// From one of the pill's lyric lines to the next.
+const PILL_LYRIC_ROW: f32 = 21.0;
+
+/// The pill's height now: taller with lyrics.
+fn pill_height() -> f32 {
+    if lyrics_on() { PILL_LYRICS_HEIGHT } else { PILL_HEIGHT }
+}
+
+/// The pill's window now.
+fn pill_window() -> Vec2 {
+    vec2(PILL_WINDOW.x, pill_height() + 2.0)
+}
+
 /// How far the window moves up for a card opening upwards, in points.
-const CARD_TRAVEL: f32 = CARD_SIZE.y - PILL_HEIGHT;
+fn card_travel() -> f32 {
+    CARD_SIZE.y - pill_height()
+}
 /// Picture in picture: the mini player for a video, when first opened, and as small and
 /// as big as it goes. Any shape in between: the video keeps its own, in black.
 const VIDEO_SIZE: Vec2 = vec2(480.0, 270.0);
@@ -68,9 +88,14 @@ const LYRIC_SCROLL: f64 = 0.35;
 /// The strip shows the song's lyrics under its controls.
 static LYRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The mini player shows lyrics: under the strip, or in the pill in place of the artists.
+pub fn lyrics_on() -> bool {
+    LYRICS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The strip shows lyrics (not the pill, nor the video).
 pub fn lyrics_shown() -> bool {
-    LYRICS.load(std::sync::atomic::Ordering::Relaxed) && !pill_active() && !video_active()
+    lyrics_on() && !pill_active() && !video_active()
 }
 
 /// The mini player is the video (picture in picture): a video was on show when it opened.
@@ -115,8 +140,9 @@ pub fn pill_active() -> bool {
 /// left and stays in the corner it's placed in. `low`: at the window's bottom, which a card
 /// opening upwards has lifted.
 fn pill_rect(r: Rect, width: f32, low: bool) -> Rect {
-    let top = if low { r.bottom() - 1.0 - PILL_HEIGHT } else { r.top() + 1.0 };
-    Rect::from_min_size(pos2(r.right() - 1.0 - width, top), vec2(width, PILL_HEIGHT))
+    let h = pill_height();
+    let top = if low { r.bottom() - 1.0 - h } else { r.top() + 1.0 };
+    Rect::from_min_size(pos2(r.right() - 1.0 - width, top), vec2(width, h))
 }
 
 /// The card in the window `r` (the card's window).
@@ -136,7 +162,7 @@ fn region(rect: Rect, radius: f32, ppp: f32) -> (i32, i32, i32, i32, i32) {
 /// How far (whole pixels, so up and back down end where they began) the window moves up
 /// for a card opening upwards.
 fn travel(ppp: f32) -> f32 {
-    (CARD_TRAVEL * ppp).round()
+    (card_travel() * ppp).round()
 }
 
 /// Where the mini player's place is saved: each style its own, as their sizes differ.
@@ -157,7 +183,7 @@ fn mini_size() -> Vec2 {
     if video_active() {
         VIDEO_SIZE
     } else if pill_active() {
-        PILL_WINDOW
+        pill_window()
     } else if lyrics_shown() {
         SIZE + vec2(0.0, LYRICS_H)
     } else {
@@ -418,7 +444,7 @@ impl Mini {
         let (Some(outer), Some(area)) = (outer, (self.screens.work_area)()) else { return self.up };
         let ppp = ctx.pixels_per_point();
         let pill_top = (outer.min.y + 1.0) * ppp;
-        let fits_up = pill_top - CARD_TRAVEL * ppp >= area.top();
+        let fits_up = pill_top - card_travel() * ppp >= area.top();
         let fits_down = pill_top + CARD_SIZE.y * ppp <= area.bottom();
         fits_up || !fits_down
     }
@@ -440,7 +466,7 @@ impl Mini {
         }
         (self.tall, self.grown) = (false, false);
         self.limits(ctx, true);
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(PILL_WINDOW));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(pill_window()));
     }
 
     /// Where the pill is, for its window at `p`: lower down while the card has lifted it.
@@ -573,21 +599,23 @@ impl Mini {
         ctx.request_repaint();
     }
 
-    /// Show or hide the lyrics under the strip: it grows downwards, or upwards where
-    /// there's no room below it, and shrinks back the same way.
+    /// Show or hide the lyrics: under the strip, or in a taller pill. The window grows
+    /// downwards, or upwards where there's no room below it, and shrinks back the same way.
     pub fn set_lyrics(&mut self, ctx: &egui::Context, on: bool) {
         LYRICS.store(on, std::sync::atomic::Ordering::Relaxed);
-        if !self.showing() || pill_active() || video_active() {
+        // The card keeps its size: the pill takes its new one when the card shuts.
+        if !self.showing() || video_active() || (pill_active() && self.tall) {
             return;
         }
+        let extra = if pill_active() { PILL_LYRICS_HEIGHT - PILL_HEIGHT } else { LYRICS_H };
         let ppp = ctx.pixels_per_point();
         if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            let below = (self.screens.work_area)().is_some_and(|a| (outer.bottom() + LYRICS_H) * ppp > a.bottom());
+            let below = (self.screens.work_area)().is_some_and(|a| (outer.bottom() + extra) * ppp > a.bottom());
             let dy = if on && below {
                 self.lyrics_lifted = true;
-                -LYRICS_H
+                -extra
             } else if !on && std::mem::take(&mut self.lyrics_lifted) {
-                LYRICS_H
+                extra
             } else {
                 0.0
             };
@@ -596,7 +624,8 @@ impl Mini {
             }
         }
         // Growing, the old height would still be the most; shrinking, the least.
-        let size = vec2(ctx.content_rect().width(), mini_size().y);
+        let width = if pill_active() { PILL_WINDOW.x } else { ctx.content_rect().width() };
+        let size = vec2(width, mini_size().y);
         if on {
             ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(vec2(width_limits().1, size.y)));
         } else {
@@ -968,65 +997,88 @@ struct LyricScroll {
     since: f64,
 }
 
+/// What the mini player's lyrics show now.
+enum LyricNow {
+    /// The lines from `first`, and where they're scrolled to: the line being sung is at
+    /// `pos` when it's whole; -1 is before the first line.
+    Lines { first: isize, lines: Vec<String>, pos: f32 },
+    /// Loading, none, or not synced: a word about it.
+    Note(&'static str),
+}
+
+/// The lyrics around the line being sung, two either side, scrolled smoothly from one line
+/// to the next. `mem`: whose scroll this is (the strip's or the pill's).
+fn lyric_now(app: &mut App, ctx: &egui::Context, mem: egui::Id, now: f64) -> LyricNow {
+    use crate::lyrics::Sync;
+    let Some((id, set)) = app.lyrics.take() else {
+        return LyricNow::Note(if app.current().is_some() { "Loading lyrics…" } else { "" });
+    };
+    let hide_break_only = app.look().lyrics.hide_instrumental_only;
+    let chosen = app.lyric_prefs.choose(&id, &set).and_then(|p| set.get(p)).filter(|l| !hide_break_only || !l.lines.iter().all(|x| x.instrumental));
+    let out = match chosen {
+        None => LyricNow::Note("No lyrics for this song"),
+        Some(l) if l.sync == Sync::None => LyricNow::Note("These lyrics aren't synced"),
+        Some(lyrics) => {
+            let t = app.lyric_time(&id, lyrics, now);
+            // The last line that has started; -1 before the first.
+            let line = lyrics.lines.partition_point(|l| l.start as f64 / 1000.0 <= t) as isize - 1;
+            let key = (id.clone(), lyrics.provider.key());
+            let mut s: LyricScroll = ctx.data(|d| d.get_temp(mem)).unwrap_or_default();
+            let shown = |s: &LyricScroll| {
+                let k = ((now - s.since) / LYRIC_SCROLL).clamp(0.0, 1.0) as f32;
+                egui::lerp(s.from..=s.line as f32, theme::ease_out(k))
+            };
+            if s.key != key {
+                s = LyricScroll { key, line, from: line as f32, since: now };
+            } else if s.line != line {
+                // A jump (a seek) goes there at once; the next line scrolls up.
+                let from = if (line - s.line).abs() > 2 { line as f32 } else { shown(&s) };
+                s = LyricScroll { line, from, since: now, ..s };
+            }
+            let pos = shown(&s);
+            if pos != s.line as f32 {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else if app.playing() {
+                // Soon enough for the next line to start on time.
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            ctx.data_mut(|d| d.insert_temp(mem, s));
+            let first = (pos.floor() as isize - 2).max(0);
+            let last = (pos.ceil() as isize + 2).min(lyrics.lines.len() as isize - 1);
+            let lines = (first..=last)
+                .map(|i| {
+                    let l = &lyrics.lines[i as usize];
+                    if l.instrumental || l.text.trim().is_empty() { "♪".to_owned() } else { l.text.trim().to_owned() }
+                })
+                .collect();
+            LyricNow::Lines { first, lines, pos }
+        }
+    };
+    app.lyrics = Some((id, set));
+    out
+}
+
 /// The line before, the one being sung (bright and larger) and the one after, moving up
 /// as the song goes on. Plain text, not the karaoke view: three lines in a small window.
 fn strip_lyrics(app: &mut App, ui: &mut Ui, area: Rect, now: f64) {
-    use crate::lyrics::Sync;
     let ctx = ui.ctx().clone();
     let painter = ui.painter_at(area);
     // A faint rule between the strip and its lyrics.
     painter.hline(area.x_range(), area.top(), egui::Stroke::new(1.0, theme::glass(0.12)));
-    let note = |text: &str| {
-        let g = widgets::galley(ui, text, theme::regular(13.0), theme::text_faint(), area.width());
-        painter.galley(area.center() - g.size() / 2.0, g, theme::text_faint());
+    let (first, lines, pos) = match lyric_now(app, &ctx, ui.scope_id().with("mini-lyrics"), now) {
+        LyricNow::Lines { first, lines, pos } => (first, lines, pos),
+        LyricNow::Note(text) => {
+            let g = widgets::galley(ui, text, theme::regular(13.0), theme::text_faint(), area.width());
+            painter.galley(area.center() - g.size() / 2.0, g, theme::text_faint());
+            return;
+        }
     };
-    let Some((id, set)) = app.lyrics.take() else {
-        note(if app.current().is_some() { "Loading lyrics…" } else { "" });
-        return;
-    };
-    let hide_break_only = app.look().lyrics.hide_instrumental_only;
-    let chosen = app.lyric_prefs.choose(&id, &set).and_then(|p| set.get(p)).filter(|l| !hide_break_only || !l.lines.iter().all(|x| x.instrumental));
-    let Some(lyrics) = chosen else {
-        note("No lyrics for this song");
-        app.lyrics = Some((id, set));
-        return;
-    };
-    if lyrics.sync == Sync::None {
-        note("These lyrics aren't synced");
-        app.lyrics = Some((id, set));
-        return;
-    }
-    let t = app.lyric_time(&id, lyrics, now);
-    // The last line that has started; -1 before the first.
-    let line = lyrics.lines.partition_point(|l| l.start as f64 / 1000.0 <= t) as isize - 1;
-    let key = (id.clone(), lyrics.provider.key());
-    let mem = ui.scope_id().with("mini-lyrics");
-    let mut s: LyricScroll = ctx.data(|d| d.get_temp(mem)).unwrap_or_default();
-    let shown = |s: &LyricScroll| {
-        let k = ((now - s.since) / LYRIC_SCROLL).clamp(0.0, 1.0) as f32;
-        egui::lerp(s.from..=s.line as f32, theme::ease_out(k))
-    };
-    if s.key != key {
-        s = LyricScroll { key, line, from: line as f32, since: now };
-    } else if s.line != line {
-        // A jump (a seek) goes there at once; the next line scrolls up.
-        let from = if (line - s.line).abs() > 2 { line as f32 } else { shown(&s) };
-        s = LyricScroll { line, from, since: now, ..s };
-    }
-    let pos = shown(&s);
-    let moving = pos != s.line as f32;
-    ctx.data_mut(|d| d.insert_temp(mem, s));
-
     let font = app.look().lyrics.font.clone();
     let mid = area.center().y + 2.0;
-    let first = (pos.floor() as isize - 2).max(0);
-    let last = (pos.ceil() as isize + 2).min(lyrics.lines.len() as isize - 1);
-    for i in first..=last {
-        let l = &lyrics.lines[i as usize];
+    for (i, text) in (first..).zip(&lines) {
         // 0 for the line being sung, 1 for those either side.
         let d = (i as f32 - pos).abs().min(2.0);
         let near = (1.0 - d).max(0.0);
-        let text = if l.instrumental || l.text.trim().is_empty() { "♪" } else { l.text.trim() };
         let size = egui::lerp(13.0..=16.0, near);
         let weight = if near > 0.5 { crate::preset::Weight::Bold } else { crate::preset::Weight::Medium };
         let color = theme::lerp_color(theme::text_dim(), theme::text(), near).gamma_multiply(1.0 - (d - 1.0).max(0.0));
@@ -1034,12 +1086,26 @@ fn strip_lyrics(app: &mut App, ui: &mut Ui, area: Rect, now: f64) {
         let y = mid + (i as f32 - pos) * LYRIC_ROW;
         painter.galley(pos2(area.center().x - g.size().x / 2.0, y - g.size().y / 2.0), g, color);
     }
-    app.lyrics = Some((id, set));
-    if moving {
-        ctx.request_repaint_after(Duration::from_millis(16));
-    } else if app.playing() {
-        // Soon enough for the next line to start on time.
-        ctx.request_repaint_after(Duration::from_millis(100));
+}
+
+/// The pill's lyrics: the line before, the one being sung (brighter and larger) and the
+/// one after, left-aligned beside the cover, moving up as the song goes on.
+fn pill_lyrics(app: &App, ui: &Ui, area: Rect, first: isize, lines: &[String], pos: f32, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let painter = ui.painter_at(area);
+    let font = &app.look().lyrics.font;
+    let mid = area.center().y;
+    for (i, text) in (first..).zip(lines) {
+        let d = (i as f32 - pos).abs().min(2.0);
+        let near = (1.0 - d).max(0.0);
+        let size = egui::lerp(11.5..=13.5, near);
+        let weight = if near > 0.5 { crate::preset::Weight::Bold } else { crate::preset::Weight::Medium };
+        let color = theme::lerp_color(theme::text_dim(), theme::text(), near).gamma_multiply(alpha * (1.0 - (d - 1.0).max(0.0)));
+        let g = widgets::galley(ui, text, theme::lyric_font_for(font, weight, size, text), color, area.width());
+        let y = mid + (i as f32 - pos) * PILL_LYRIC_ROW;
+        painter.galley(pos2(area.left(), y - g.size().y / 2.0), g, color);
     }
 }
 
@@ -1100,10 +1166,12 @@ pub fn pill(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let low = app.mini.lifted;
     let width_id = egui::Id::unique("pill-width");
-    let was = ctx.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(PILL_REST);
+    // With lyrics, as wide at rest as it opens: room for a line of them.
+    let rest = if lyrics_on() { PILL_OPEN } else { PILL_REST };
+    let was = ctx.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(rest);
     let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| pill_rect(r, was, low).contains(p));
     // The keyboard opens it too, or Tab would land on buttons nobody can see.
-    let focused = ctx.memory(|m| m.focused()).is_some_and(|f| ["prev", "play", "next", "card", "close"].iter().any(|k| pill_btn(k) == f));
+    let focused = ctx.memory(|m| m.focused()).is_some_and(|f| ["lyrics", "prev", "play", "next", "card", "close"].iter().any(|k| pill_btn(k) == f));
     let active = over || focused || card_on;
     // A toast takes the text's place, with the pill opened for the room, until it's pointed at.
     let toast = app.toast.as_ref().filter(|_| !active).map(|(msg, _)| msg.clone());
@@ -1112,7 +1180,7 @@ pub fn pill(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let open = theme::anim_bool(&ctx, "pill-open", active || toast.is_some(), 0.18);
     let reveal = theme::anim_bool(&ctx, "pill-buttons", active, 0.18);
-    let width = egui::lerp(PILL_REST..=PILL_OPEN, open);
+    let width = egui::lerp(rest..=PILL_OPEN, open);
     ctx.data_mut(|d| d.insert_temp(width_id, width));
     let (small, card) = (pill_rect(r, width, low), card_rect(r));
     let rect = Rect::from_min_max(small.min.lerp(card.min, grow), small.max.lerp(card.max, grow));
@@ -1193,16 +1261,30 @@ fn pill_row(app: &mut App, ui: &mut Ui, rect: Rect, reveal: f32, toast: Option<S
     // Title and artists, making room for the buttons as they slide out.
     let shift = if CARD { 26.0 } else { 0.0 };
     let x0 = c.x + 30.0;
-    let text_w = (rect.right() - 14.0 - (126.0 + shift) * reveal - x0).max(10.0);
+    let text_w = (rect.right() - 14.0 - (126.0 + PILL_LYRICS_BTN + shift) * reveal - x0).max(10.0);
     let cy = rect.center().y;
     let (title, artists) = match &track {
         Some(t) => (t.title.clone(), t.artist_line()),
         None => ("Nothing playing".to_owned(), String::new()),
     };
     let explicit = track.as_ref().is_some_and(|t| t.explicit);
+    // With lyrics, they take the title's place until the pill is pointed at.
+    let lyric = (lyrics_on() && track.is_some()).then(|| lyric_now(app, &ctx, pill_btn("lyrics-scroll"), now));
     if let Some(msg) = toast {
         let g = ui.painter().layout(msg, theme::semibold(13.0), theme::text(), text_w);
         ui.painter().galley(pos2(x0, cy - g.size().y / 2.0), g, theme::text());
+    } else if let Some(LyricNow::Lines { first, lines, pos }) = &lyric {
+        let area = Rect::from_min_max(pos2(x0, rect.top() + 3.0), pos2(x0 + text_w, rect.bottom() - 3.0));
+        pill_lyrics(app, ui, area, *first, lines, *pos, 1.0 - reveal);
+        if reveal > 0.0 {
+            widgets::title_at(ui, pos2(x0, cy - 17.0), &title, explicit, theme::semibold(13.0), theme::text().gamma_multiply(reveal), text_w);
+            text_at(ui, pos2(x0, cy + 2.0), &artists, theme::regular(11.5), theme::text_dim().gamma_multiply(reveal), text_w);
+        }
+    } else if let Some(LyricNow::Note(note)) = &lyric {
+        // Loading, or none: the song, and a word about its lyrics under it.
+        widgets::title_at(ui, pos2(x0, cy - 26.0), &title, explicit, theme::semibold(13.0), theme::text(), text_w);
+        text_at(ui, pos2(x0, cy - 7.0), &artists, theme::regular(11.5), theme::text_dim(), text_w);
+        text_at(ui, pos2(x0, cy + 11.0), note, theme::regular(11.0), theme::text_faint(), text_w);
     } else {
         widgets::title_at(ui, pos2(x0, cy - 17.0), &title, explicit, theme::semibold(13.0), theme::text(), text_w);
         text_at(ui, pos2(x0, cy + 2.0), &artists, theme::regular(11.5), theme::text_dim(), text_w);
@@ -1223,7 +1305,8 @@ fn pill_row(app: &mut App, ui: &mut Ui, rect: Rect, reveal: f32, toast: Option<S
     let right = rect.right();
     // Which way it'll open from here, while the window is the pill's.
     let up = if app.mini.tall { app.mini.up } else { app.mini.opens_up(&ctx) };
-    let mut buttons = vec![(113.0 + shift, icon::SKIP_BACK, "prev", "Previous"), (47.0 + shift, icon::SKIP_FORWARD, "next", "Next"), (21.0, icon::X, "close", "Close")];
+    let lyrics_name = if lyrics_on() { "Hide lyrics" } else { "Show lyrics" };
+    let mut buttons = vec![(113.0 + PILL_LYRICS_BTN + shift, icon::MIC_VOCAL, "lyrics", lyrics_name), (113.0 + shift, icon::SKIP_BACK, "prev", "Previous"), (47.0 + shift, icon::SKIP_FORWARD, "next", "Next"), (21.0, icon::X, "close", "Close")];
     if CARD {
         buttons.push((47.0, if up { icon::CHEVRON_UP } else { icon::CHEVRON_DOWN }, "card", "More"));
     }
@@ -1234,12 +1317,19 @@ fn pill_row(app: &mut App, ui: &mut Ui, rect: Rect, reveal: f32, toast: Option<S
         if hot {
             ui.painter().circle_filled(center, 13.0, theme::glass(0.12));
         }
-        icon_at(ui, center, glyph, if key == "close" { 13.0 } else { 16.0 }, if hot { theme::text() } else { theme::text_dim() }.gamma_multiply(reveal));
+        let lit = hot || (key == "lyrics" && lyrics_on());
+        let size = match key {
+            "close" => 13.0,
+            "lyrics" => 15.0,
+            _ => 16.0,
+        };
+        icon_at(ui, center, glyph, size, if lit { theme::text() } else { theme::text_dim() }.gamma_multiply(reveal));
         if resp.clicked() {
             match key {
                 "prev" if enabled => app.prev(),
                 "next" if enabled => app.next(),
                 "card" => app.mini.set_card(&ctx, true),
+                "lyrics" => app.mini.set_lyrics(&ctx, !lyrics_on()),
                 "close" => close_window(app, &ctx),
                 _ => {}
             }
@@ -1653,7 +1743,7 @@ mod tests {
         let c = region(card_rect(tall), CARD_RADIUS, ppp);
         assert_eq!(c, (0, 0, (CARD_WINDOW.x * ppp).ceil() as i32, (CARD_WINDOW.y * ppp).ceil() as i32, c.4));
         let (top, low) = (pill_rect(tall, PILL_OPEN, false), pill_rect(tall, PILL_OPEN, true));
-        assert_eq!(low.top() - top.top(), CARD_TRAVEL);
+        assert_eq!(low.top() - top.top(), card_travel());
     }
 
     #[test]

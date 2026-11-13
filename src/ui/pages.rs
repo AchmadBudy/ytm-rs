@@ -1937,6 +1937,13 @@ fn settings_mini(app: &mut App, ui: &mut Ui) {
             });
         });
         divider(ui);
+        setting_row(ui, "Lyrics", Some("The song's lyrics in the mini player: under the strip, or in the pill in place of the artists."), |ui| {
+            let mut on = mini::lyrics_on();
+            if toggle(ui, &mut on, "Lyrics").changed() {
+                app.mini.set_lyrics(ui.ctx(), on);
+            }
+        });
+        divider(ui);
         setting_row(ui, "Keep on top", Some("The mini player stays above other windows."), |ui| {
             let mut on = app.mini.pinned;
             if toggle(ui, &mut on, "Keep on top").changed() {
