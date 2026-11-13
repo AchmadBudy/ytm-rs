@@ -79,9 +79,13 @@ const VIDEO_MIN: Vec2 = vec2(240.0, 135.0);
 const VIDEO_MAX: Vec2 = vec2(1280.0, 720.0);
 /// How much taller the strip grows to show lyrics: the line before, the one being sung
 /// and the one after.
-const LYRICS_H: f32 = 92.0;
-/// From one lyric line's middle to the next.
+const LYRICS_H: f32 = 108.0;
+/// From one lyric line's middle to the next, when each fits on one row.
 const LYRIC_ROW: f32 = 27.0;
+/// Between one lyric line and the next, when they wrap.
+const LYRIC_GAP: f32 = 7.0;
+/// A long lyric line wraps onto at most this many rows, then ends with "…".
+const LYRIC_ROWS: usize = 2;
 /// How long the lines take to move up when the next one starts.
 const LYRIC_SCROLL: f64 = 0.35;
 
@@ -1074,17 +1078,52 @@ fn strip_lyrics(app: &mut App, ui: &mut Ui, area: Rect, now: f64) {
         }
     };
     let font = app.look().lyrics.font.clone();
-    let mid = area.center().y + 2.0;
-    for (i, text) in (first..).zip(&lines) {
-        // 0 for the line being sung, 1 for those either side.
-        let d = (i as f32 - pos).abs().min(2.0);
-        let near = (1.0 - d).max(0.0);
-        let size = egui::lerp(13.0..=16.0, near);
-        let weight = if near > 0.5 { crate::preset::Weight::Bold } else { crate::preset::Weight::Medium };
-        let color = theme::lerp_color(theme::text_dim(), theme::text(), near).gamma_multiply(1.0 - (d - 1.0).max(0.0));
-        let g = widgets::galley(ui, text, theme::lyric_font_for(&font, weight, size, text), color, area.width());
-        let y = mid + (i as f32 - pos) * LYRIC_ROW;
-        painter.galley(pos2(area.center().x - g.size().x / 2.0, y - g.size().y / 2.0), g, color);
+    // Each line centred and wrapped (a long one onto two rows), the one being sung larger.
+    let laid: Vec<_> = (first..)
+        .zip(&lines)
+        .map(|(i, text)| {
+            // 0 for the line being sung, 1 for those either side.
+            let d = (i as f32 - pos).abs().min(2.0);
+            let near = (1.0 - d).max(0.0);
+            let size = egui::lerp(13.0..=16.0, near);
+            let weight = if near > 0.5 { crate::preset::Weight::Bold } else { crate::preset::Weight::Medium };
+            let color = theme::lerp_color(theme::text_dim(), theme::text(), near).gamma_multiply(1.0 - (d - 1.0).max(0.0));
+            let mut job = egui::text::LayoutJob::simple(text.clone(), theme::lyric_font_for(&font, weight, size, text), color, area.width());
+            job.wrap.max_rows = LYRIC_ROWS;
+            job.wrap.break_anywhere = false;
+            job.wrap.overflow_character = Some('…');
+            job.halign = egui::Align::Center;
+            (ui.fonts_mut(|f| f.layout_job(job)), color)
+        })
+        .collect();
+    // Each line's middle, from the first's, as tall as they've wrapped.
+    let mut mids = Vec::with_capacity(laid.len());
+    for (k, (g, _)) in laid.iter().enumerate() {
+        let y = match k {
+            0 => 0.0,
+            _ => mids[k - 1] + laid[k - 1].0.size().y / 2.0 + LYRIC_GAP + g.size().y / 2.0,
+        };
+        mids.push(y);
+    }
+    // Where the scroll is, between the line it's leaving and the one it's moving to.
+    let at = pos - first as f32;
+    let lo = at.floor();
+    let frac = at - lo;
+    let mid_of = |k: f32| -> f32 {
+        let last = mids.len() as f32 - 1.0;
+        if k < 0.0 {
+            mids.first().copied().unwrap_or(0.0) + k * LYRIC_ROW
+        } else if k > last {
+            mids.last().copied().unwrap_or(0.0) + (k - last) * LYRIC_ROW
+        } else {
+            mids[k as usize]
+        }
+    };
+    let scroll = egui::lerp(mid_of(lo)..=mid_of(lo + 1.0), frac);
+    let centre = area.center().y + 2.0;
+    for ((g, color), y) in laid.into_iter().zip(&mids) {
+        let top = centre + y - scroll - g.size().y / 2.0;
+        painter.galley(pos2(area.center().x, top), g, color);
     }
 }
 
